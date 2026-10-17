@@ -44,3 +44,29 @@ def extract_explain_info(plan) -> ExplainInfo:
         estimated_rows=estimated_rows,
         total_cost=total_cost,
     )
+
+def get_table_rows(
+    relation: str,
+    conninfo: str,
+    schema: str = "public",
+) -> int | None:
+
+    query = """
+        SELECT c.reltuples
+        FROM pg_catalog.pg_class c
+        JOIN pg_catalog.pg_namespace n
+          ON n.oid = c.relnamespace
+        WHERE n.nspname = %s
+          AND c.relname = %s
+          AND c.relkind IN ('r', 'p')
+    """
+
+    with psycopg.connect(conninfo) as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, (schema, relation))
+            row = cur.fetchone()
+
+    if row is None or row[0] < 0:
+        return None
+
+    return int(row[0])
