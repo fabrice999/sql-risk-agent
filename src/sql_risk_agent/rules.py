@@ -12,6 +12,8 @@ class RiskResult:
     analysis_status: str = "completed"
 
     estimated_rows: int | None = None
+    table_rows: int | None = None
+    affected_percentage: float | None = None
     scan_type: str | None = None
 
 def analyze_delete(statement: ast.DeleteStmt) -> RiskResult:

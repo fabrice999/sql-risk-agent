@@ -1,10 +1,5 @@
-from pglast import ast, parse_sql
 
-from .postgres import (
-    get_explain_plan,
-    extract_explain_info,
-    get_table_rows,
-)
+from pglast import parse_sql, ast
 
 from .rules import (
     RiskResult,
@@ -12,15 +7,38 @@ from .rules import (
     analyze_insert,
     analyze_select,
     analyze_update,
-    evaluate_estimated_rows,
     evaluate_relative_risk,
 )
 
-def analyze_sql(sql: str, conninfo: str | None = None) -> RiskResult:
+from .postgres import (
+    get_explain_plan,
+    extract_explain_info,
+    get_table_rows,
+)
+
+
+def analyze_sql(
+    sql: str,
+    conninfo: str | None = None,
+) -> RiskResult:
+    """
+    Analyze a SQL statement before execution.
+
+    Without conninfo:
+        Perform static AST analysis only.
+
+    With conninfo:
+        Perform static analysis and PostgreSQL EXPLAIN,
+        then evaluate the estimated relative impact.
+
+    PostgreSQL EXPLAIN is executed without ANALYZE.
+    """
 
     mode = "postgresql" if conninfo is not None else "static"
 
+    # --------------------------------------------------
     # Step 1: Parse SQL
+    # --------------------------------------------------
     try:
         statements = parse_sql(sql)
 
@@ -33,7 +51,9 @@ def analyze_sql(sql: str, conninfo: str | None = None) -> RiskResult:
             analysis_status="failed",
         )
 
-    # Step 2: Check statement count
+    # --------------------------------------------------
+    # Step 2: Validate statement count
+    # --------------------------------------------------
     if len(statements) != 1:
         return RiskResult(
             verdict="block",
@@ -44,7 +64,9 @@ def analyze_sql(sql: str, conninfo: str | None = None) -> RiskResult:
 
     statement = statements[0].stmt
 
-    # Step 3: Static analysis
+    # --------------------------------------------------
+    # Step 3: Static AST analysis
+    # --------------------------------------------------
     if isinstance(statement, ast.DeleteStmt):
         result = analyze_delete(statement)
 
@@ -65,16 +87,20 @@ def analyze_sql(sql: str, conninfo: str | None = None) -> RiskResult:
             analysis_mode=mode,
         )
 
-    # A static rule has already rejected the SQL.
+    # A static rule has already blocked the statement.
     if result.verdict == "block":
         result.analysis_mode = mode
         return result
 
-    # Static analysis only.
+    # --------------------------------------------------
+    # Step 4: Static-only mode
+    # --------------------------------------------------
     if conninfo is None:
         return result
 
-    # Step 4: PostgreSQL EXPLAIN
+    # --------------------------------------------------
+    # Step 5: PostgreSQL EXPLAIN
+    # --------------------------------------------------
     try:
         plan = get_explain_plan(sql, conninfo)
         info = extract_explain_info(plan)
@@ -88,11 +114,13 @@ def analyze_sql(sql: str, conninfo: str | None = None) -> RiskResult:
             analysis_status="failed",
         )
 
-    # Step 5: Table statistics
+    # --------------------------------------------------
+    # Step 6: Retrieve table statistics
+    # --------------------------------------------------
     try:
         table_rows = get_table_rows(
-            info.relation,
-            conninfo,
+            relation=info.relation,
+            conninfo=conninfo,
         )
 
         if table_rows is None:
@@ -117,7 +145,9 @@ def analyze_sql(sql: str, conninfo: str | None = None) -> RiskResult:
             scan_type=info.scan_type,
         )
 
-    # Step 6: Risk evaluation
+    # --------------------------------------------------
+    # Step 7: Evaluate relative risk
+    # --------------------------------------------------
     try:
         result = evaluate_relative_risk(
             estimated_rows=info.estimated_rows,
@@ -132,13 +162,26 @@ def analyze_sql(sql: str, conninfo: str | None = None) -> RiskResult:
             analysis_mode="postgresql",
             analysis_status="failed",
             estimated_rows=info.estimated_rows,
+            table_rows=table_rows,
             scan_type=info.scan_type,
         )
 
-    # Step 7: Enrich the result
+    # --------------------------------------------------
+    # Step 8: Enrich the structured result
+    # --------------------------------------------------
     result.analysis_mode = "postgresql"
     result.analysis_status = "completed"
+
     result.estimated_rows = info.estimated_rows
+    result.table_rows = table_rows
+
+    result.affected_percentage = (
+        100.0 * info.estimated_rows / table_rows
+        if table_rows > 0
+        else None
+    )
+
     result.scan_type = info.scan_type
 
     return result
+
